@@ -1,23 +1,23 @@
 k6s:
- - instalacja
- - mala apka w Go z jednym endpointem
- - k6s testuje endpoint
- - wstrzykniecie losowych bledow
- - wstrzykniecie losowych opoznien
- - structured logging:
-    - logrus?
-    - grafana:
-      - loki (/w promtail)
-      - dashboard do czytania logow
- - metryki prometheus:
-    - instrumentacja
-    - prometheus
-    - dashboard
- - traces
-    - otel z propagacja
-    - tempo
-    - dashboard
- - korelacja monitoringu:
-    - metryki -> logi -> traces
-    - examplars
-- korelacja k6s z monitoringiem (czy to jest w ogole mozliwe bez k6 x Tempo?)
+ - [X] instalacja
+ - [X] mala apka w Go z jednym endpointem
+ - [X] k6s testuje endpoint
+ - [ ] wstrzykniecie losowych bledow
+ - [ ] wstrzykniecie losowych opoznien
+ - [ ] structured logging:
+    - [ ] logrus?
+    - [ ] grafana:
+      - [ ] loki (/w promtail)
+      - [ ] dashboard do czytania logow
+ - [ ] metryki prometheus:
+    - [ ] instrumentacja
+    - [ ] prometheus
+    - [ ] dashboard
+ - [ ] traces
+    - [ ] otel z propagacja
+    - [ ] tempo
+    - [ ] dashboard
+ - [ ] korelacja monitoringu:
+    - [ ] metryki -> logi -> traces
+    - [ ] examplars
+- [ ] korelacja k6s z monitoringiem (czy to jest w ogole mozliwe bez k6 x Tempo?)
