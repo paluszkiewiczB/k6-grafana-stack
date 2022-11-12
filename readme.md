@@ -6,7 +6,7 @@
 - [X] tiny Go app with single endpoint
 - [X] k6 script testing the endpoint
 - [X] inject some failures
-- [ ] inject some delays
+- [X] inject some delays
 - [ ] structured logging:
    - [ ] logrus?
    - [ ] grafana
