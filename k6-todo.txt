@@ -2,7 +2,7 @@ k6s:
  - [X] instalacja
  - [X] mala apka w Go z jednym endpointem
  - [X] k6s testuje endpoint
- - [ ] wstrzykniecie losowych bledow
+ - [X] wstrzykniecie losowych bledow
  - [ ] wstrzykniecie losowych opoznien
  - [ ] structured logging:
     - [ ] logrus?
