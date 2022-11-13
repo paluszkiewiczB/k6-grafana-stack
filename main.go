@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"go.uber.org/zap"
 	"io"
-	stdlog "log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -13,11 +13,8 @@ import (
 )
 
 func main() {
-	l, err := zap.NewProduction()
-	if err != nil {
-		stdlog.Fatal(err)
-	}
-	err = http.ListenAndServe("0.0.0.0:8080", newServer(l))
+	l := zap.NewExample()
+	err := http.ListenAndServe("0.0.0.0:8080", newServer(l))
 	if err != nil {
 		l.Fatal("could not start http server", zap.Error(err))
 	}
@@ -49,6 +46,10 @@ func newServer(l *zap.Logger) *server {
 	}
 	unstableRaw := &unstableHandler{
 		ctxLogger: setupZap(l),
+		stabler: &httpStabler{
+			ctxLogger: setupZap(l),
+			Client:    http.Client{},
+		},
 	}
 	unstable := &correlationIdMiddleware{
 		Logger:  l,
@@ -89,42 +90,28 @@ func (s *stableHandler) ServeHTTP(writer http.ResponseWriter, r *http.Request) {
 
 type unstableHandler struct {
 	ctxLogger
+	stabler
 }
 
 func (u *unstableHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	log := u.ctxLogger(request.Context())
 	wrap(
 		func(writer http.ResponseWriter, request *http.Request) {
-			rawUrl := "http://localhost:8080/stable"
-			parse, err := url.Parse(rawUrl)
+			resp, err := u.stable(request.Context())
 			if err != nil {
-				log.Fatal("invalid url", zap.String("url", rawUrl), zap.Error(err))
-			}
-			cId := request.Context().Value("correlationId").(string)
-			getReq := http.Request{
-				Method: "GET",
-				URL:    parse,
-				Header: http.Header{
-					"correlation-id": []string{cId},
-				},
-			}
-
-			resp, err := http.DefaultClient.Do(&getReq)
-			if err != nil {
-				log.Error("could not send get request", zap.Error(err), zap.Any("request", request))
-			}
-
-			if err != nil {
-				log.Error("could not get stable response")
+				log.Error("could not get stable response", zap.Error(err))
 				writer.WriteHeader(500)
+				log.Debug("sent response", zap.Int("code", 500))
 				return
 			}
 
 			writer.WriteHeader(200)
-			_, err = io.Copy(writer, resp.Body)
+			b, err := writer.Write([]byte(resp))
 			if err != nil {
-				log.Error("could not copy response body to request")
+				log.Error("could not write response bytes", zap.Error(err))
 			}
+
+			log.Debug("sent response", zap.Int("code", 200), zap.Int("body_bytes", b))
 		},
 		func(next http.HandlerFunc) http.HandlerFunc {
 			return injectFails(log, next)
@@ -184,4 +171,43 @@ func (m *correlationIdMiddleware) ServeHTTP(writer http.ResponseWriter, request 
 
 	withCid := context.WithValue(request.Context(), "correlationId", correlationId)
 	m.Handler.ServeHTTP(writer, request.WithContext(withCid))
+}
+
+type stabler interface {
+	stable(ctx context.Context) (string, error)
+}
+
+type httpStabler struct {
+	ctxLogger
+	http.Client
+}
+
+func (s *httpStabler) stable(ctx context.Context) (string, error) {
+	log := s.ctxLogger(ctx)
+	cId := ctx.Value("correlationId").(string)
+	rawUrl := "http://localhost:8080/stable"
+	parse, err := url.Parse(rawUrl)
+	if err != nil {
+		log.Fatal("invalid url", zap.String("url", rawUrl), zap.Error(err))
+	}
+	getReq := http.Request{
+		Method: "GET",
+		URL:    parse,
+		Header: http.Header{
+			"correlation-id": []string{cId},
+		},
+	}
+
+	resp, err := http.DefaultClient.Do(&getReq)
+	if err != nil {
+		log.Error("could not send get request", zap.Error(err), zap.Any("request", getReq))
+		return "", fmt.Errorf("could not send get request to %s. %v", parse.String(), err)
+	}
+
+	bytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Error("could not read response bytes", zap.Error(err))
+		return "", fmt.Errorf("could not read response bytes. %v", err)
+	}
+	return string(bytes), nil
 }
