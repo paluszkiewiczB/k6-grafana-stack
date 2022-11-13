@@ -1,0 +1,11 @@
+version: "3.3"
+services:
+  app:
+    build:
+      context: .
+    ports:
+      - "8080:8080"
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
