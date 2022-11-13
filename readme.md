@@ -8,7 +8,7 @@
 - [X] inject some failures
 - [X] inject some delays
 - [ ] structured logging:
-   - [ ] logrus?
+   - [X] ~~logrus?~~ zap
    - [ ] grafana
       - [ ] loki (/w promtail)
       - [ ] dashboard for reading the logs
