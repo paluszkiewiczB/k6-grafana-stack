@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"go.uber.org/zap"
+	"io"
 	stdlog "log"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 )
@@ -46,8 +48,7 @@ func newServer(l *zap.Logger) *server {
 		Handler: stableRaw,
 	}
 	unstableRaw := &unstableHandler{
-		ctxLogger:     setupZap(l),
-		stableHandler: stableRaw,
+		ctxLogger: setupZap(l),
 	}
 	unstable := &correlationIdMiddleware{
 		Logger:  l,
@@ -61,7 +62,7 @@ func newServer(l *zap.Logger) *server {
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.logger.Info("handling new request")
+	s.logger.Info("handling new request", zap.String("uri", r.URL.String()))
 	switch r.URL.Path {
 	case "/stable":
 		s.stable.ServeHTTP(w, r)
@@ -88,16 +89,49 @@ func (s *stableHandler) ServeHTTP(writer http.ResponseWriter, r *http.Request) {
 
 type unstableHandler struct {
 	ctxLogger
-	*stableHandler
 }
 
 func (u *unstableHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	log := u.ctxLogger(request.Context())
-	wrap(u.stableHandler.ServeHTTP, func(next http.HandlerFunc) http.HandlerFunc {
-		return injectFails(log, next)
-	}, func(next http.HandlerFunc) http.HandlerFunc {
-		return slowDown(log, next)
-	})(writer, request)
+	wrap(
+		func(writer http.ResponseWriter, request *http.Request) {
+			rawUrl := "http://localhost:8080/stable"
+			parse, err := url.Parse(rawUrl)
+			if err != nil {
+				log.Fatal("invalid url", zap.String("url", rawUrl), zap.Error(err))
+			}
+			cId := request.Context().Value("correlationId").(string)
+			getReq := http.Request{
+				Method: "GET",
+				URL:    parse,
+				Header: http.Header{
+					"correlation-id": []string{cId},
+				},
+			}
+
+			resp, err := http.DefaultClient.Do(&getReq)
+			if err != nil {
+				log.Error("could not send get request", zap.Error(err), zap.Any("request", request))
+			}
+
+			if err != nil {
+				log.Error("could not get stable response")
+				writer.WriteHeader(500)
+				return
+			}
+
+			writer.WriteHeader(200)
+			_, err = io.Copy(writer, resp.Body)
+			if err != nil {
+				log.Error("could not copy response body to request")
+			}
+		},
+		func(next http.HandlerFunc) http.HandlerFunc {
+			return injectFails(log, next)
+		}, func(next http.HandlerFunc) http.HandlerFunc {
+			return slowDown(log, next)
+		},
+	)(writer, request)
 }
 
 func injectFails(l *zap.Logger, next http.HandlerFunc) http.HandlerFunc {
