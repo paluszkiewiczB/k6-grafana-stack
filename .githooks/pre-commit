@@ -15,6 +15,7 @@ function format(){
 }
 
 function tidy(){
+  echo "$PATH"
   go mod tidy
   git add go.mod
   git add go.sum

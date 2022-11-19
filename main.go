@@ -3,26 +3,102 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 )
 
 func main() {
+	back := context.Background()
 	l := zap.NewExample()
-	err := http.ListenAndServe("0.0.0.0:8080", newServer(l))
-	if err != nil {
-		l.Fatal("could not start http server", zap.Error(err))
+	ctx := gracefulShutdown(back, l)
+
+	logicSrv := cancellableServer(ctx, l)
+	logicSrv.BaseContext = baseContext(ctx)
+	logicSrv.Handler = newLogicHandler(l)
+	logicSrv.Addr = "0.0.0.0:8080"
+
+	go func() {
+		l.Info("starting logic server")
+		err := logicSrv.ListenAndServe()
+		if err != nil {
+			l.Fatal("could not start logic server", zap.Error(err))
+		}
+	}()
+
+	promSrv := cancellableServer(ctx, l)
+	promSrv.BaseContext = baseContext(ctx)
+	promSrv.Handler = &promHandler{promhttp.Handler()}
+	promSrv.Addr = "0.0.0.0:9090"
+	go func() {
+		l.Info("starting prometheus server")
+		err := promSrv.ListenAndServe()
+		if err != nil {
+			l.Fatal("could not start prometheus server", zap.Error(err))
+		}
+	}()
+
+	l.Info("application started")
+	_ = <-ctx.Done()
+}
+
+type promHandler struct {
+	http.Handler
+}
+
+func (p *promHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/metrics":
+		p.Handler.ServeHTTP(w, r)
+	default:
+		notFoundResponse(w)
 	}
+}
+
+func baseContext(ctx context.Context) func(listener net.Listener) context.Context {
+	return func(listener net.Listener) context.Context {
+		return ctx
+	}
+}
+
+func cancellableServer(ctx context.Context, l *zap.Logger) *http.Server {
+	s := http.Server{}
+	go func() {
+		_ = <-ctx.Done()
+		timeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		err := s.Shutdown(timeout)
+		if err != nil {
+			l.Error("could not gracefully shutdown the http logicHandler", zap.Error(err))
+		}
+	}()
+	return &s
+}
+
+func gracefulShutdown(parent context.Context, l *zap.Logger) context.Context {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM, syscall.SIGABRT)
+	ctx, cancelFunc := context.WithCancel(parent)
+	go func() {
+		_ = <-c
+		l.Info("shutting down")
+		cancelFunc()
+	}()
+	return ctx
 }
 
 type ctxLogger func(ctx context.Context) *zap.Logger
 
-type server struct {
+type logicHandler struct {
 	logger           *zap.Logger
 	stable, unstable http.Handler
 }
@@ -38,7 +114,7 @@ func setupZap(logger *zap.Logger) func(ctx context.Context) *zap.Logger {
 	}
 }
 
-func newServer(l *zap.Logger) *server {
+func newLogicHandler(l *zap.Logger) *logicHandler {
 	stableRaw := &stableHandler{setupZap(l)}
 	stable := &correlationIdMiddleware{
 		Logger:  l,
@@ -55,14 +131,14 @@ func newServer(l *zap.Logger) *server {
 		Logger:  l,
 		Handler: unstableRaw,
 	}
-	return &server{
+	return &logicHandler{
 		logger:   l,
 		stable:   stable,
 		unstable: unstable,
 	}
 }
 
-func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *logicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("handling new request", zap.String("uri", r.URL.String()))
 	switch r.URL.Path {
 	case "/stable":
@@ -72,9 +148,13 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.unstable.ServeHTTP(w, r)
 		break
 	default:
-		w.WriteHeader(404)
-		_, _ = w.Write([]byte("not found"))
+		notFoundResponse(w)
 	}
+}
+
+func notFoundResponse(w http.ResponseWriter) {
+	w.WriteHeader(404)
+	_, _ = w.Write([]byte("not found"))
 }
 
 type stableHandler struct {
