@@ -6,6 +6,19 @@ services:
     ports:
       - "8080:8080"
   grafana:
-    image: grafana/grafana
+    image: grafana/grafana:9.2.4
     ports:
       - "3000:3000"
+    volumes:
+      - ./docker/grafana/provisioning/:/etc/grafana/provisioning/
+      - ./docker/grafana/dashboards/:/var/lib/grafana/dashboards/
+  loki:
+    image: grafana/loki:2.7.0
+    command: -config.file=/etc/loki/local-config.yaml
+  promtail:
+    image: grafana/promtail:2.7.0
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers
+      - ./docker/promtail-cfg.yaml:/etc/promtail/docker-config.yml
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: -config.file=/etc/promtail/docker-config.yml

@@ -4,4 +4,4 @@ Dockerfile
 Makefile
 readme.md
 simple.js
-test.sh
+docker/

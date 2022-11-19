@@ -9,10 +9,10 @@
 - [X] inject some delays
 - [ ] structured logging:
     - [X] ~~logrus?~~ zap
-    - [ ] grafana
+    - [X] grafana
         - [X] app running in docker
-        - [ ] loki (/w promtail)
-        - [ ] dashboard for reading the logs
+        - [X] loki (/w promtail)
+        - [X] dashboard for reading the logs
 - [ ] prometheus metrics:
     - [ ] instrument the app
     - [ ] setup prometheus
