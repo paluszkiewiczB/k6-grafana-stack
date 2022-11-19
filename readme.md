@@ -14,7 +14,7 @@
         - [X] loki (/w promtail)
         - [X] dashboard for reading the logs
 - [ ] prometheus metrics:
-    - [ ] instrument the app
+    - [X] instrument the app
     - [ ] setup prometheus
     - [ ] add dashboard
 - [ ] traces

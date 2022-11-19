@@ -2,7 +2,6 @@
 
 set -e; set -o pipefail
 
-
 function format(){
  toFormat=$(git --no-pager diff --name-status --no-color --cached | awk '$1 != "D" && $2 ~ ".go" {print $2}' )
  echo "files to format: $toFormat"
@@ -15,7 +14,6 @@ function format(){
 }
 
 function tidy(){
-  echo "$PATH"
   go mod tidy
   git add go.mod
   git add go.sum

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 	"io"
@@ -114,17 +116,51 @@ func setupZap(logger *zap.Logger) func(ctx context.Context) *zap.Logger {
 	}
 }
 
+var (
+	stableOk = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "k6gpt",
+		Subsystem: "stable",
+		Name:      "http_requests_success_total",
+		Help:      "Total number of successfully handled http requests",
+	})
+	stableTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "k6gpt",
+		Subsystem: "stable",
+		Name:      "http_requests_total",
+		Help:      "Total number of handled http requests",
+	})
+	unstableOk = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "k6gpt",
+		Subsystem: "unstable",
+		Name:      "http_requests_success_total",
+		Help:      "Total number of successfully handled http requests",
+	})
+	unstableTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "k6gpt",
+		Subsystem: "unstable",
+		Name:      "http_requests_total",
+		Help:      "Total number of handled http requests",
+	})
+)
+
 func newLogicHandler(l *zap.Logger) *logicHandler {
-	stableRaw := &stableHandler{setupZap(l)}
-	stable := &correlationIdMiddleware{
-		Logger:  l,
-		Handler: stableRaw,
+	stable := &countingMiddleware{
+		ok:    stableOk,
+		total: stableTotal,
+		Handler: &correlationIdMiddleware{
+			Logger:  l,
+			Handler: &stableHandler{setupZap(l)},
+		},
 	}
-	unstableRaw := &unstableHandler{
-		ctxLogger: setupZap(l),
-		stabler: &httpStabler{
+	unstableRaw := &countingMiddleware{
+		ok:    unstableOk,
+		total: unstableTotal,
+		Handler: &unstableHandler{
 			ctxLogger: setupZap(l),
-			Client:    http.Client{},
+			stabler: &httpStabler{
+				ctxLogger: setupZap(l),
+				Client:    http.Client{},
+			},
 		},
 	}
 	unstable := &correlationIdMiddleware{
@@ -283,11 +319,42 @@ func (s *httpStabler) stable(ctx context.Context) (string, error) {
 		log.Error("could not send get request", zap.Error(err), zap.Any("request", getReq))
 		return "", fmt.Errorf("could not send get request to %s. %v", parse.String(), err)
 	}
-
+	defer logErr(log, resp.Body.Close)
 	bytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Error("could not read response bytes", zap.Error(err))
 		return "", fmt.Errorf("could not read response bytes. %v", err)
 	}
 	return string(bytes), nil
+}
+
+type countingMiddleware struct {
+	ok, total prometheus.Counter
+	http.Handler
+}
+
+func (m *countingMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer m.total.Inc()
+	writer := &statusHoldingResponseWriter{ResponseWriter: w}
+	m.Handler.ServeHTTP(writer, r)
+	if writer.status < 500 {
+		m.ok.Inc()
+	}
+}
+
+func logErr(l *zap.Logger, f func() error) {
+	err := f()
+	if err != nil {
+		l.Error("unexpected error: %v", zap.Error(err))
+	}
+}
+
+type statusHoldingResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusHoldingResponseWriter) WriteHeader(statusCode int) {
+	s.status = statusCode
+	s.ResponseWriter.WriteHeader(statusCode)
 }
