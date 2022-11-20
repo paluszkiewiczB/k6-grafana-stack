@@ -15,10 +15,18 @@ services:
   loki:
     image: grafana/loki:2.7.0
     command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
   promtail:
     image: grafana/promtail:2.7.0
     volumes:
-      - /var/lib/docker/containers:/var/lib/docker/containers
-      - ./docker/promtail-cfg.yaml:/etc/promtail/docker-config.yml
       - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/containers:/var/lib/docker/containers
+      - ./docker/promtail/docker-config.yaml:/etc/promtail/docker-config.yml
     command: -config.file=/etc/promtail/docker-config.yml
+  prometheus:
+    image: prom/prometheus-linux-amd64:v2.40.2
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/:/etc/prometheus/

@@ -7,16 +7,16 @@
 - [X] k6 script testing the endpoint
 - [X] inject some failures
 - [X] inject some delays
-- [ ] structured logging:
+- [X] structured logging:
     - [X] ~~logrus?~~ zap
     - [X] grafana
         - [X] app running in docker
         - [X] loki (/w promtail)
         - [X] dashboard for reading the logs
-- [ ] prometheus metrics:
+- [X] prometheus metrics:
     - [X] instrument the app
-    - [ ] setup prometheus
-    - [ ] add dashboard
+    - [X] setup prometheus
+    - [X] add dashboard
 - [ ] traces
     - [ ] otel with correlation propagation (second endpoint?)
     - [ ] tempo
