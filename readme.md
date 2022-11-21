@@ -18,7 +18,7 @@
     - [X] setup prometheus
     - [X] add dashboard
 - [ ] traces
-    - [ ] otel with correlation propagation (second endpoint?)
+    - [X] otel with correlation propagation (second endpoint?) -> /unstable calls /stable
     - [ ] tempo
     - [ ] dashboard
 - [ ] monitoring correlations

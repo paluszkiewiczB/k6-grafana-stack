@@ -6,6 +6,20 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	_ "go.opentelemetry.io/otel/attribute"
+	_ "go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/metric/global"
+	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
+	"go.opentelemetry.io/otel/trace"
+	_ "go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"io"
 	"math/rand"
@@ -19,14 +33,74 @@ import (
 	"time"
 )
 
+func initTracer(ctx context.Context, l *zap.Logger) (*sdktrace.TracerProvider, error) {
+	exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	if err != nil {
+		return nil, err
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceNameKey.String(tracerName))),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	go func() {
+		<-ctx.Done()
+		l.Info("shutting down otel tracer provider")
+		shutCtx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelFunc()
+		if err := tp.Shutdown(shutCtx); err != nil {
+			l.Error("error shutting down tracer provider", zap.Error(err))
+		}
+	}()
+
+	return tp, err
+}
+
+func initMeter(ctx context.Context, l *zap.Logger) (*sdkmetric.MeterProvider, error) {
+	exp, err := stdoutmetric.New()
+	if err != nil {
+		return nil, err
+	}
+
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp)))
+	global.SetMeterProvider(mp)
+	go func() {
+		<-ctx.Done()
+		l.Info("shutting down otel meter provider")
+		shutCtx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelFunc()
+		if err := mp.Shutdown(shutCtx); err != nil {
+			l.Error("error shutting down meter provider", zap.Error(err))
+		}
+	}()
+
+	return mp, nil
+}
+
 func main() {
-	back := context.Background()
 	l := zap.NewExample()
+	back := context.Background()
 	ctx := gracefulShutdown(back, l)
+
+	tp, err := initTracer(ctx, l)
+	if err != nil {
+		l.Fatal("could not init tracer", zap.Error(err))
+	}
+
+	_, err = initMeter(ctx, l)
+	if err != nil {
+		l.Fatal("could not init meter", zap.Error(err))
+	}
+
+	t := tp.Tracer(tracerName)
 
 	logicSrv := cancellableServer(ctx, l)
 	logicSrv.BaseContext = baseContext(ctx)
-	logicSrv.Handler = newLogicHandler(l)
+	logicSrv.Handler = otelhttp.NewHandler(newLogicHandler(l, t), "logic routing")
 	logicSrv.Addr = "0.0.0.0:8080"
 
 	go func() {
@@ -92,7 +166,7 @@ func gracefulShutdown(parent context.Context, l *zap.Logger) context.Context {
 	ctx, cancelFunc := context.WithCancel(parent)
 	go func() {
 		_ = <-c
-		l.Info("shutting down")
+		l.Info("received shutdown signal")
 		cancelFunc()
 	}()
 	return ctx
@@ -141,28 +215,41 @@ var (
 		Name:      "http_requests_total",
 		Help:      "Total number of handled http requests",
 	})
+	tracerName = "k6gpt"
 )
 
-func newLogicHandler(l *zap.Logger) *logicHandler {
-	stable := &countingMiddleware{
-		ok:    stableOk,
-		total: stableTotal,
-		Handler: &correlationIdMiddleware{
-			Logger:  l,
-			Handler: &stableHandler{setupZap(l)},
-		},
-	}
-	unstableRaw := &countingMiddleware{
-		ok:    unstableOk,
-		total: unstableTotal,
-		Handler: &unstableHandler{
-			ctxLogger: setupZap(l),
-			stabler: &httpStabler{
-				ctxLogger: setupZap(l),
-				Client:    http.Client{},
+func newLogicHandler(l *zap.Logger, t trace.Tracer) *logicHandler {
+	stable := otelhttp.NewHandler(
+		&countingMiddleware{
+			ok:    stableOk,
+			total: stableTotal,
+			Handler: &correlationIdMiddleware{
+				Logger:  l,
+				Handler: &stableHandler{setupZap(l)},
 			},
 		},
-	}
+		"http-stable",
+	)
+	unstableRaw := otelhttp.NewHandler(
+		&countingMiddleware{
+			ok:    unstableOk,
+			total: unstableTotal,
+			Handler: &unstableHandler{
+				ctxLogger: setupZap(l),
+				stabler: &tracingStabler{
+					opName: "stabler",
+					Tracer: t,
+					stabler: &httpStabler{
+						ctxLogger: setupZap(l),
+						Client: http.Client{
+							Transport: otelhttp.NewTransport(http.DefaultTransport),
+						},
+					},
+				},
+			},
+		},
+		"http-unstable",
+	)
 	unstable := &correlationIdMiddleware{
 		Logger:  l,
 		Handler: unstableRaw,
@@ -230,22 +317,17 @@ func (u *unstableHandler) ServeHTTP(writer http.ResponseWriter, request *http.Re
 			log.Debug("sent response", zap.Int("code", 200), zap.Int("body_bytes", b))
 		},
 		func(next http.HandlerFunc) http.HandlerFunc {
-			return injectFails(log, next)
+			return injectFails(next)
 		}, func(next http.HandlerFunc) http.HandlerFunc {
 			return slowDown(log, next)
 		},
 	)(writer, request)
 }
 
-func injectFails(l *zap.Logger, next http.HandlerFunc) http.HandlerFunc {
+func injectFails(next http.HandlerFunc) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		if rand.Intn(2) == 0 {
-			next(writer, request)
-			return
-		}
-
-		l.Info("random fail")
-		writer.WriteHeader(500)
+		next(writer, request)
+		return
 	}
 }
 
@@ -293,6 +375,18 @@ type stabler interface {
 	stable(ctx context.Context) (string, error)
 }
 
+type tracingStabler struct {
+	opName string
+	trace.Tracer
+	stabler
+}
+
+func (t *tracingStabler) stable(ctx context.Context) (string, error) {
+	newCtx, span := otel.Tracer(tracerName).Start(ctx, t.opName)
+	defer span.End()
+	return t.stabler.stable(newCtx)
+}
+
 type httpStabler struct {
 	ctxLogger
 	http.Client
@@ -314,7 +408,7 @@ func (s *httpStabler) stable(ctx context.Context) (string, error) {
 		},
 	}
 
-	resp, err := http.DefaultClient.Do(&getReq)
+	resp, err := s.Client.Do(getReq.WithContext(ctx))
 	if err != nil {
 		log.Error("could not send get request", zap.Error(err), zap.Any("request", getReq))
 		return "", fmt.Errorf("could not send get request to %s. %v", parse.String(), err)
