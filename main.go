@@ -4,23 +4,23 @@ import (
 	"context"
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	_ "go.opentelemetry.io/otel/attribute"
 	_ "go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
-	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/metric/global"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
 	"go.opentelemetry.io/otel/trace"
 	_ "go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"io"
 	"math/rand"
 	"net"
@@ -33,31 +33,46 @@ import (
 	"time"
 )
 
-func initTracer(ctx context.Context, l *zap.Logger) (*sdktrace.TracerProvider, error) {
-	exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+func initGrpcTracer(ctx context.Context, l *zap.Logger) (*sdktrace.TracerProvider, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if tracesGrpcUrl == "" {
+		l.Warn("otel grpc url not specified, defaulting to localhost:4317")
+		tracesGrpcUrl = "localhost:4317"
+	}
+	conn, err := grpc.DialContext(dialCtx, tracesGrpcUrl, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create gRPC connection to collector: %w", err)
 	}
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceNameKey.String(tracerName))),
-	)
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	// Set up a trace exporter
+	traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create trace exporter: %w", err)
+	}
 
+	// Register the trace exporter with a TracerProvider, using a batch
+	// span processor to aggregate spans before export.
+	bsp := sdktrace.NewBatchSpanProcessor(traceExporter)
+	tracerProvider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSpanProcessor(bsp),
+	)
+	otel.SetTracerProvider(tracerProvider)
+
+	// set global propagator to tracecontext (the default is no-op).
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	// Shutdown will flush any remaining spans and shut down the exporter.
 	go func() {
 		<-ctx.Done()
-		l.Info("shutting down otel tracer provider")
-		shutCtx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancelFunc()
-		if err := tp.Shutdown(shutCtx); err != nil {
-			l.Error("error shutting down tracer provider", zap.Error(err))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracerProvider.Shutdown(ctx); err != nil {
+			l.Error("could not shutdown tracer provider", zap.Error(err))
 		}
 	}()
-
-	return tp, err
+	return tracerProvider, nil
 }
 
 func initMeter(ctx context.Context, l *zap.Logger) (*sdkmetric.MeterProvider, error) {
@@ -81,17 +96,24 @@ func initMeter(ctx context.Context, l *zap.Logger) (*sdkmetric.MeterProvider, er
 	return mp, nil
 }
 
+var (
+	logicPort     = os.Getenv("LOGIC_PORT")
+	tracesGrpcUrl = os.Getenv("TRACE_GRPC_URL")
+)
+
 func main() {
 	l := zap.NewExample()
-	back := context.Background()
-	ctx := gracefulShutdown(back, l)
-
-	tp, err := initTracer(ctx, l)
+	ctx := gracefulShutdown(context.Background(), l)
+	tp, err := initGrpcTracer(ctx, l)
 	if err != nil {
-		l.Fatal("could not init tracer", zap.Error(err))
+		l.Error("could not init grpc tracer", zap.Error(err))
+		return
 	}
+	l.Info("grpc tracer started")
 
-	_, err = initMeter(ctx, l)
+	prometheus.MustRegister(stableSummary, unstableSummary)
+
+	//_, err = initMeter(ctx, l)
 	if err != nil {
 		l.Fatal("could not init meter", zap.Error(err))
 	}
@@ -101,7 +123,11 @@ func main() {
 	logicSrv := cancellableServer(ctx, l)
 	logicSrv.BaseContext = baseContext(ctx)
 	logicSrv.Handler = otelhttp.NewHandler(newLogicHandler(l, t), "logic routing")
-	logicSrv.Addr = "0.0.0.0:8080"
+	if logicPort == "" {
+		l.Warn("logic port not specified, defaulting to 8080")
+		logicPort = "8080"
+	}
+	logicSrv.Addr = fmt.Sprintf("0.0.0.0:%s", logicPort)
 
 	go func() {
 		l.Info("starting logic server")
@@ -113,7 +139,7 @@ func main() {
 
 	promSrv := cancellableServer(ctx, l)
 	promSrv.BaseContext = baseContext(ctx)
-	promSrv.Handler = &promHandler{promhttp.Handler()}
+	promSrv.Handler = &promHandler{setupZap(l), promhttp.Handler()}
 	promSrv.Addr = "0.0.0.0:9090"
 	go func() {
 		l.Info("starting prometheus server")
@@ -128,6 +154,7 @@ func main() {
 }
 
 type promHandler struct {
+	ctxLogger
 	http.Handler
 }
 
@@ -186,43 +213,36 @@ func setupZap(logger *zap.Logger) func(ctx context.Context) *zap.Logger {
 		if cId, ok := rawCid.(string); ok {
 			l = l.With(zap.String("correlationId", cId))
 		}
+
+		span := trace.SpanFromContext(ctx)
+		l = l.With(zap.String("TraceID", span.SpanContext().TraceID().String()))
+		l = l.With(zap.String("SpanID", span.SpanContext().SpanID().String()))
+
 		return l
 	}
 }
 
 var (
-	stableOk = promauto.NewCounter(prometheus.CounterOpts{
+	stableSummary = prometheus.NewSummary(prometheus.SummaryOpts{
 		Namespace: "k6gpt",
 		Subsystem: "stable",
-		Name:      "http_requests_success_total",
-		Help:      "Total number of successfully handled http requests",
+		Name:      "http_requests_duration_millis",
+		Help:      "Duration of http request for endpoint /stable",
 	})
-	stableTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Namespace: "k6gpt",
-		Subsystem: "stable",
-		Name:      "http_requests_total",
-		Help:      "Total number of handled http requests",
-	})
-	unstableOk = promauto.NewCounter(prometheus.CounterOpts{
+	unstableSummary = prometheus.NewSummary(prometheus.SummaryOpts{
 		Namespace: "k6gpt",
 		Subsystem: "unstable",
-		Name:      "http_requests_success_total",
-		Help:      "Total number of successfully handled http requests",
-	})
-	unstableTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Namespace: "k6gpt",
-		Subsystem: "unstable",
-		Name:      "http_requests_total",
-		Help:      "Total number of handled http requests",
+		Name:      "http_requests_duration_millis",
+		Help:      "Duration of http request for endpoint /unstableSummary",
 	})
 	tracerName = "k6gpt"
 )
 
 func newLogicHandler(l *zap.Logger, t trace.Tracer) *logicHandler {
 	stable := otelhttp.NewHandler(
-		&countingMiddleware{
-			ok:    stableOk,
-			total: stableTotal,
+		&timingMiddleware{
+			ctxLogger: setupZap(l),
+			Summary:   stableSummary,
 			Handler: &correlationIdMiddleware{
 				Logger:  l,
 				Handler: &stableHandler{setupZap(l)},
@@ -231,9 +251,9 @@ func newLogicHandler(l *zap.Logger, t trace.Tracer) *logicHandler {
 		"http-stable",
 	)
 	unstableRaw := otelhttp.NewHandler(
-		&countingMiddleware{
-			ok:    unstableOk,
-			total: unstableTotal,
+		&timingMiddleware{
+			ctxLogger: setupZap(l),
+			Summary:   unstableSummary,
 			Handler: &unstableHandler{
 				ctxLogger: setupZap(l),
 				stabler: &tracingStabler{
@@ -332,10 +352,14 @@ func injectFails(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func slowDown(l *zap.Logger, next http.HandlerFunc) http.HandlerFunc {
-	ms := rand.Intn(1000)
-	l.Info("slowing down", zap.Int("ms", ms))
-	time.Sleep(time.Duration(ms * int(time.Millisecond)))
-	return next
+	return func(writer http.ResponseWriter, request *http.Request) {
+		ms := rand.Intn(1000)
+		span := trace.SpanFromContext(request.Context())
+		span.AddEvent("slow down", trace.WithAttributes(attribute.Int("ms", ms)))
+		l.Info("slowing down", zap.Int("ms", ms))
+		time.Sleep(time.Duration(ms * int(time.Millisecond)))
+		next.ServeHTTP(writer, request)
+	}
 }
 
 type middleware func(next http.HandlerFunc) http.HandlerFunc
@@ -395,7 +419,7 @@ type httpStabler struct {
 func (s *httpStabler) stable(ctx context.Context) (string, error) {
 	log := s.ctxLogger(ctx)
 	cId := ctx.Value("correlationId").(string)
-	rawUrl := "http://localhost:8080/stable"
+	rawUrl := fmt.Sprintf("http://localhost:%s/stable", logicPort)
 	parse, err := url.Parse(rawUrl)
 	if err != nil {
 		log.Fatal("invalid url", zap.String("url", rawUrl), zap.Error(err))
@@ -422,18 +446,20 @@ func (s *httpStabler) stable(ctx context.Context) (string, error) {
 	return string(bytes), nil
 }
 
-type countingMiddleware struct {
-	ok, total prometheus.Counter
+type timingMiddleware struct {
+	ctxLogger
+	prometheus.Summary
 	http.Handler
 }
 
-func (m *countingMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	defer m.total.Inc()
-	writer := &statusHoldingResponseWriter{ResponseWriter: w}
-	m.Handler.ServeHTTP(writer, r)
-	if writer.status < 500 {
-		m.ok.Inc()
-	}
+func (t *timingMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		ms := float64(time.Since(start).Milliseconds())
+		t.ctxLogger(r.Context()).Debug("observing", zap.Float64("ms", ms))
+		t.Summary.Observe(ms)
+	}()
+	t.Handler.ServeHTTP(w, r)
 }
 
 func logErr(l *zap.Logger, f func() error) {
@@ -441,14 +467,4 @@ func logErr(l *zap.Logger, f func() error) {
 	if err != nil {
 		l.Error("unexpected error: %v", zap.Error(err))
 	}
-}
-
-type statusHoldingResponseWriter struct {
-	http.ResponseWriter
-	status int
-}
-
-func (s *statusHoldingResponseWriter) WriteHeader(statusCode int) {
-	s.status = statusCode
-	s.ResponseWriter.WriteHeader(statusCode)
 }

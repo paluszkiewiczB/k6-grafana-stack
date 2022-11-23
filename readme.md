@@ -17,10 +17,10 @@
     - [X] instrument the app
     - [X] setup prometheus
     - [X] add dashboard
-- [ ] traces
+- [X] traces
     - [X] otel with correlation propagation (second endpoint?) -> /unstable calls /stable
-    - [ ] tempo
-    - [ ] dashboard
+    - [X] tempo
+    - [X] ~~dashboard~~ -> slow traces panel 
 - [ ] monitoring correlations
     - [ ] metrics -> logs -> traces
     - [ ] metrics examplars
