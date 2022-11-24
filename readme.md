@@ -20,10 +20,14 @@
 - [X] traces
     - [X] otel with correlation propagation (second endpoint?) -> /unstable calls /stable
     - [X] tempo
-    - [X] ~~dashboard~~ -> slow traces panel 
+    - [X] ~~dashboard~~ -> slow traces panel
 - [ ] monitoring correlations
-    - [ ] metrics -> logs -> traces
-    - [ ] metrics examplars
+    - [X] traces -> logs
+    - [X] logs -> traces
+    - [ ] metrics -> logs
+    - [ ] logs -> metrics
+    - [ ] metrics -> traces
+    - [ ] traces -> metrics
 - [ ] correlate k6s /w monitoring
     - is it event possible without k6 x Tempo?
     - try prometheus remote write with exemplars on failed checks

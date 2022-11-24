@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/metric/global"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	_ "go.opentelemetry.io/otel/trace"
@@ -57,6 +58,12 @@ func initGrpcTracer(ctx context.Context, l *zap.Logger) (*sdktrace.TracerProvide
 	tracerProvider := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithSpanProcessor(bsp),
+		// dummy hardcoded attributes to allow for traces to logs correlation
+		// span attributes are used in LogQL query and must match log labels
+		sdktrace.WithResource(resource.NewSchemaless(
+			attribute.String("job", "promtail"),
+			attribute.String("container", "k6-grafana-prometheus-tempo_app_1"),
+		)),
 	)
 	otel.SetTracerProvider(tracerProvider)
 
@@ -113,7 +120,6 @@ func main() {
 
 	prometheus.MustRegister(stableSummary, unstableSummary)
 
-	//_, err = initMeter(ctx, l)
 	if err != nil {
 		l.Fatal("could not init meter", zap.Error(err))
 	}

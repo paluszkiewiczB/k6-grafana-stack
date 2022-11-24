@@ -13,9 +13,7 @@ datasources:
       maxLines: 1000
       derivedFields:
         - datasourceUid: "tempo"
-          # TODO link from Loki to Tempo does not work
-          # potential reasons - tempo.tracesToLogs.tags, tags mapping?
-          matcherRegex: 'TraceID\\"\\:\\"(\\w+)\"'
+          matcherRegex: 'TraceID\"\:\"(\w+)\"'
           name: TraceID
           url: '$${__value.raw}' #will be interpreted as tempo query
   - name: Tempo
@@ -26,23 +24,13 @@ datasources:
       httpMethod: GET
       tracesToLogs:
         datasourceUid: 'loki'
-        tags: [ 'job', 'instance' ]
+        tags: [ 'job', 'container']
         mapTagNamesEnabled: false
         spanStartTimeShift: '1h'
         spanEndTimeShift: '1h'
-        filterByTraceID: false
+        filterByTraceID: true
         filterBySpanID: false
-      #      tracesToMetrics:
-      #        datasourceUid: 'prometheus'
-      #        tags: [{ key: 'service.name', value: 'service' }, { key: 'job' }]
-      #        queries:
-      #          - name: 'Sample query'
-      #            query: 'sum(rate(tempo_spanmetrics_latency_bucket{$__tags}[5m]))'
-      #      serviceMap:
-      #        datasourceUid: 'prometheus'
       search:
         hide: false
-      #      nodeGraph:
-      #        enabled: true
       lokiSearch:
         datasourceUid: 'loki'
