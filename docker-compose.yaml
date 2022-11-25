@@ -5,6 +5,7 @@ services:
       context: .
     ports:
       - "7080:7080"
+      - "9090:9090"
     environment:
       - "LOGIC_PORT=7080"
       - "TRACE_GRPC_URL=tempo:4317"

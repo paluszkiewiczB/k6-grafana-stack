@@ -118,7 +118,7 @@ func main() {
 	}
 	l.Info("grpc tracer started")
 
-	prometheus.MustRegister(stableSummary, unstableSummary)
+	prometheus.MustRegister(stableSummary, unstableSummary, counter)
 
 	if err != nil {
 		l.Fatal("could not init meter", zap.Error(err))
@@ -241,6 +241,14 @@ var (
 		Name:      "http_requests_duration_millis",
 		Help:      "Duration of http request for endpoint /unstableSummary",
 	})
+	counter = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "k6gpt",
+		Subsystem: "router",
+		Name:      "http_requests_total",
+		Help:      "Total count of http requests",
+	},
+		[]string{"operator"},
+	)
 	tracerName = "k6gpt"
 )
 
@@ -288,6 +296,7 @@ func newLogicHandler(l *zap.Logger, t trace.Tracer) *logicHandler {
 }
 
 func (s *logicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	counter.WithLabelValues(r.URL.Query().Get("operator")).Inc()
 	s.logger.Info("handling new request", zap.String("uri", r.URL.String()))
 	switch r.URL.Path {
 	case "/stable":
