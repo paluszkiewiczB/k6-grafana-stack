@@ -26,7 +26,7 @@
     - [X] logs -> traces
     - [ ] metrics -> logs
     - [ ] logs -> metrics
-    - [ ] metrics -> traces
+    - [X] metrics -> traces
     - [ ] traces -> metrics
 - [ ] correlate k6s /w monitoring
     - is it event possible without k6 x Tempo?

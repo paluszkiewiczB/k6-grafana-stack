@@ -5,6 +5,7 @@ services:
       context: .
     ports:
       - "7080:7080"
+      - "10090:9090"
     environment:
       - "LOGIC_PORT=7080"
       - "TRACE_GRPC_URL=tempo:4317"
@@ -33,9 +34,12 @@ services:
     command: "-config.file=/etc/promtail/docker-config.yml"
   prometheus:
     image: prom/prometheus-linux-amd64:v2.40.2
+    ports:
+      - "11090:9090"
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--web.enable-remote-write-receiver"
+      - "--enable-feature=exemplar-storage"
     volumes:
       - ./docker/prometheus/:/etc/prometheus/
   tempo:

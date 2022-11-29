@@ -145,7 +145,11 @@ func main() {
 
 	promSrv := cancellableServer(ctx, l)
 	promSrv.BaseContext = baseContext(ctx)
-	promSrv.Handler = &promHandler{setupZap(l), promhttp.Handler()}
+	promSrv.Handler = &promHandler{
+		ctxLogger: setupZap(l),
+		Handler: promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{
+			EnableOpenMetrics: true,
+		})}
 	promSrv.Addr = "0.0.0.0:9090"
 	go func() {
 		l.Info("starting prometheus server")
@@ -229,17 +233,19 @@ func setupZap(logger *zap.Logger) func(ctx context.Context) *zap.Logger {
 }
 
 var (
-	stableSummary = prometheus.NewSummary(prometheus.SummaryOpts{
+	stableSummary = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "k6gpt",
 		Subsystem: "stable",
 		Name:      "http_requests_duration_millis",
 		Help:      "Duration of http request for endpoint /stable",
+		Buckets:   []float64{50, 150, 500, 1000, 5000},
 	})
-	unstableSummary = prometheus.NewSummary(prometheus.SummaryOpts{
+	unstableSummary = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "k6gpt",
 		Subsystem: "unstable",
 		Name:      "http_requests_duration_millis",
-		Help:      "Duration of http request for endpoint /unstableSummary",
+		Help:      "Duration of http request for endpoint /unstable",
+		Buckets:   []float64{50, 150, 500, 1000, 5000},
 	})
 	tracerName = "k6gpt"
 )
@@ -248,7 +254,7 @@ func newLogicHandler(l *zap.Logger, t trace.Tracer) *logicHandler {
 	stable := otelhttp.NewHandler(
 		&timingMiddleware{
 			ctxLogger: setupZap(l),
-			Summary:   stableSummary,
+			Histogram: stableSummary,
 			Handler: &correlationIdMiddleware{
 				Logger:  l,
 				Handler: &stableHandler{setupZap(l)},
@@ -259,7 +265,7 @@ func newLogicHandler(l *zap.Logger, t trace.Tracer) *logicHandler {
 	unstableRaw := otelhttp.NewHandler(
 		&timingMiddleware{
 			ctxLogger: setupZap(l),
-			Summary:   unstableSummary,
+			Histogram: unstableSummary,
 			Handler: &unstableHandler{
 				ctxLogger: setupZap(l),
 				stabler: &tracingStabler{
@@ -454,7 +460,7 @@ func (s *httpStabler) stable(ctx context.Context) (string, error) {
 
 type timingMiddleware struct {
 	ctxLogger
-	prometheus.Summary
+	prometheus.Histogram
 	http.Handler
 }
 
@@ -462,8 +468,11 @@ func (t *timingMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
 		ms := float64(time.Since(start).Milliseconds())
-		t.ctxLogger(r.Context()).Debug("observing", zap.Float64("ms", ms))
-		t.Summary.Observe(ms)
+		l := t.ctxLogger(r.Context())
+		l.Debug("observing", zap.Float64("ms", ms))
+		span := trace.SpanFromContext(r.Context())
+		tId := span.SpanContext().TraceID().String()
+		t.Histogram.(prometheus.ExemplarObserver).ObserveWithExemplar(ms, prometheus.Labels{"traceId": tId})
 	}()
 	t.Handler.ServeHTTP(w, r)
 }
