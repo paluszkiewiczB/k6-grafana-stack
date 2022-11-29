@@ -16,6 +16,7 @@ services:
     volumes:
       - ./docker/grafana/provisioning/:/etc/grafana/provisioning/
       - ./docker/grafana/dashboards/:/var/lib/grafana/dashboards/
+      - ./docker/grafana/grafana.ini:/etc/grafana/grafana.ini
     environment:
       - "GF_AUTH_ANONYMOUS_ENABLED=true"
       - "GF_AUTH_ANONYMOUS_ORG_ROLE=Admin"
